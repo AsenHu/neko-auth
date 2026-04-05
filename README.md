@@ -308,6 +308,32 @@ pub struct UpdateSessionData {
 pub struct DeleteSessionData {
     /// 被注销的会话/设备 ID (256-bit Global ID)
     pub session_id: String,
+
+    /// [可选] 引导全局登出的指令
+    /// https://openid.net/specs/openid-connect-rpinitiated-1_0.html
+    /// 仅在服务端配置了 OIDC 同步登出且该 Session 依然有效时返回
+    pub logout: Option<OidcLogoutAction>,
+}
+
+pub struct OidcLogoutAction {
+    /// 浏览器发起登出的 HTTP 方法
+    /// 取值范围: "GET" 或 "POST"
+    pub method: LogoutMethod,
+
+    /// 目标 URL：身份提供商 (IdP) 的登出端点
+    pub target: String,
+
+    /// 携带参数：
+    /// [逻辑]：
+    /// - 若为 GET：作为 Query Params 拼接到 URL 后
+    /// - 若为 POST：作为 application/x-www-form-urlencoded 放入请求体
+    /// 通常包含 id_token_hint, post_logout_redirect_uri 等
+    pub fields: HashMap<String, String>,
+}
+
+pub enum LogoutMethod {
+    Get,  // 对应字符串 "GET"
+    Post, // 对应字符串 "POST"
 }
 ```
 
@@ -512,6 +538,32 @@ pub struct UpdateSessionData {
 pub struct DeleteSessionData {
     /// 被注销的会话 ID
     pub session_id: String,
+
+    /// [可选] 引导全局登出的指令
+    /// https://openid.net/specs/openid-connect-rpinitiated-1_0.html
+    /// 仅在服务端配置了 OIDC 同步登出且该 Session 依然有效时返回
+    pub logout: Option<OidcLogoutAction>,
+}
+
+pub struct OidcLogoutAction {
+    /// 浏览器发起登出的 HTTP 方法
+    /// 取值范围: "GET" 或 "POST"
+    pub method: LogoutMethod,
+
+    /// 目标 URL：身份提供商 (IdP) 的登出端点
+    pub target: String,
+
+    /// 携带参数：
+    /// [逻辑]：
+    /// - 若为 GET：作为 Query Params 拼接到 URL 后
+    /// - 若为 POST：作为 application/x-www-form-urlencoded 放入请求体
+    /// 通常包含 id_token_hint, post_logout_redirect_uri 等
+    pub fields: HashMap<String, String>,
+}
+
+pub enum LogoutMethod {
+    Get,  // 对应字符串 "GET"
+    Post, // 对应字符串 "POST"
 }
 ```
 
@@ -538,6 +590,11 @@ pub struct BatchDeleteSessionsData {
 
     /// 执行的操作范围
     pub scope: SessionDeleteScope,
+
+    /// [可选] 引导全局登出的指令
+    /// https://openid.net/specs/openid-connect-rpinitiated-1_0.html
+    /// 仅在 scope 为 "all" 且当前会话被注销时返回
+    pub logout: Option<OidcLogoutAction>,
 }
 
 pub enum SessionDeleteScope {
@@ -545,6 +602,27 @@ pub enum SessionDeleteScope {
     Others,
     /// 注销该账号下全部活跃会话（包含当前发起请求的会话）
     All,
+}
+
+pub struct OidcLogoutAction {
+    /// 浏览器发起登出的 HTTP 方法
+    /// 取值范围: "GET" 或 "POST"
+    pub method: LogoutMethod,
+
+    /// 目标 URL：身份提供商 (IdP) 的登出端点
+    pub target: String,
+
+    /// 携带参数：
+    /// [逻辑]：
+    /// - 若为 GET：作为 Query Params 拼接到 URL 后
+    /// - 若为 POST：作为 application/x-www-form-urlencoded 放入请求体
+    /// 通常包含 id_token_hint, post_logout_redirect_uri 等
+    pub fields: HashMap<String, String>,
+}
+
+pub enum LogoutMethod {
+    Get,  // 对应字符串 "GET"
+    Post, // 对应字符串 "POST"
 }
 ```
 
