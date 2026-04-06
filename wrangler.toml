@@ -1,0 +1,6 @@
+name = "neko-auth"
+main = "build/index.js"
+compatibility_date = "2026-04-06"
+
+[build]
+command = "cargo install -q \"worker-build@^0.7\" && worker-build --release"
