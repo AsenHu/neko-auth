@@ -217,7 +217,7 @@ pub struct ProtectedJwsPayload {
 
 由于 Cookie 的发送只能指定到路径，因此使用 `POST /auth/session/refresh` 而不是 `POST /auth/session`
 
-需要 `Authorization` 请求头，需要的参数由服务端通过 Cookie 管理。
+不需要 `Authorization` 请求头，需要的参数由服务端通过 Cookie 管理。
 
 请求需要的 Cookie 如下。
 
@@ -236,6 +236,8 @@ pub struct ProtectedJwsPayload {
 | `Path` | `/auth/session/refresh` | 确保凭证仅在续期接口暴露 |
 | `SameSite` | `Strict` | 禁止在任何第三方发起的请求中携带此 Cookie |
 | `Secure` | 有 | 强制仅在加密的 HTTPS 连接中传输 |
+
+`__Http-` 是一个新前缀，不是我写错了，[参见](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#cookie_prefixes)
 
 此外，还会返回 Access Token 以供请求其他接口，格式如下。
 
