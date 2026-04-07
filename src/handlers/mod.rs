@@ -13,3 +13,4 @@ pub mod oidc;
 pub mod preferences;
 pub mod session;
 pub mod sessions;
+mod support;

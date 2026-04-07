@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, net::IpAddr};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 
@@ -33,7 +33,12 @@ pub struct SuccessResponse<T: Serialize> {
 
 impl<T: Serialize> SuccessResponse<T> {
     pub fn new(data: Option<T>, server_time: OffsetDateTime, trace_id: impl Into<String>) -> Self {
-        Self { code: "SUCCESS", data, server_time, trace_id: trace_id.into() }
+        Self {
+            code: "SUCCESS",
+            data,
+            server_time,
+            trace_id: trace_id.into(),
+        }
     }
 }
 
@@ -82,20 +87,113 @@ impl FailureResponse<()> {
 
 /// Cloudflare 注入的地理与网络元数据
 ///
-/// 使用 `serde_json::Value` 保留原始结构，以兼容未来 CF 侧字段变更。
-///
-/// 字段定义参见：
-/// <https://developers.cloudflare.com/workers/runtime-apis/request/#incomingrequestcfproperties>
-pub type Cf = Value;
+/// 字段名与 Workers `request.cf` 属性保持一致，避免在业务层使用松散 JSON。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CfProperties {
+    pub bot_management: Option<CfBotManagement>,
+    pub verified_bot_category: Option<String>,
+    pub colo: Option<String>,
+    pub asn: Option<u32>,
+    pub as_organization: Option<String>,
+    pub country: Option<String>,
+    pub http_protocol: Option<String>,
+    pub request_priority: Option<CfRequestPriority>,
+    pub tls_cipher: Option<String>,
+    pub tls_client_auth: Option<CfTlsClientAuth>,
+    pub tls_version: Option<String>,
+    pub city: Option<String>,
+    pub continent: Option<String>,
+    pub latitude: Option<String>,
+    pub longitude: Option<String>,
+    pub postal_code: Option<String>,
+    pub metro_code: Option<String>,
+    pub region: Option<String>,
+    pub region_code: Option<String>,
+    pub timezone: Option<String>,
+    #[serde(rename = "isEUCountry")]
+    pub is_eu_country: Option<bool>,
+}
+
+impl CfProperties {
+    pub fn coordinates(&self) -> Option<(f32, f32)> {
+        let lat = self.latitude.as_ref()?.parse().ok()?;
+        let lon = self.longitude.as_ref()?.parse().ok()?;
+        Some((lat, lon))
+    }
+
+    pub fn is_tor(&self) -> bool {
+        self.as_organization
+            .as_deref()
+            .map(|v| v.to_ascii_lowercase().contains("tor"))
+            .unwrap_or(false)
+    }
+}
+
+/// Bot Management 子结构
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CfBotManagement {
+    pub score: u32,
+    pub verified_bot: bool,
+    pub corporate_proxy: bool,
+    pub static_resource: bool,
+    pub ja3_hash: Option<String>,
+    pub ja4: Option<String>,
+    pub js_detection: Option<CfJsDetection>,
+    pub detection_ids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CfJsDetection {
+    pub passed: bool,
+}
+
+/// HTTP/2 优先级信息
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct CfRequestPriority {
+    pub weight: usize,
+    pub exclusive: bool,
+    pub group: usize,
+    pub group_weight: usize,
+}
+
+/// Cloudflare Access / API Shield 客户端证书信息
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CfTlsClientAuth {
+    #[serde(rename = "certIssuerDNLegacy")]
+    pub cert_issuer_dn_legacy: String,
+    #[serde(rename = "certIssuerDN")]
+    pub cert_issuer_dn: String,
+    #[serde(rename = "certIssuerDNRFC2253")]
+    pub cert_issuer_dn_rfc2253: String,
+    #[serde(rename = "certSubjectDNLegacy")]
+    pub cert_subject_dn_legacy: String,
+    pub cert_verified: String,
+    pub cert_not_after: String,
+    #[serde(rename = "certSubjectDN")]
+    pub cert_subject_dn: String,
+    #[serde(rename = "certFingerprintSHA1")]
+    pub cert_fingerprint_sha1: String,
+    #[serde(rename = "certFingerprintSHA256")]
+    pub cert_fingerprint_sha256: String,
+    pub cert_not_before: String,
+    pub cert_serial: String,
+    pub cert_presented: String,
+    #[serde(rename = "certSubjectDNRFC2253")]
+    pub cert_subject_dn_rfc2253: String,
+}
 
 /// 当前请求的物理接入环境（实时状态）
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestContext {
     /// 客户端 IP 地址（IPv4 或 IPv6）
     pub ip: IpAddr,
 
     /// Cloudflare 注入的地理与网络元数据
-    pub cf: Cf,
+    pub cf: CfProperties,
 }
 
 /// 可选字段更新语义
@@ -107,7 +205,7 @@ pub struct RequestContext {
 ///
 /// > **注意**：具体的 JSON 序列化方案尚未确定（参见 README §2.3.3），
 /// > 目前暂不提供 `Serialize`/`Deserialize` 实现。
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum FieldUpdate<T> {
     /// 不修改该字段（JSON 中字段缺失）
     #[default]
@@ -120,21 +218,32 @@ pub enum FieldUpdate<T> {
     Set(T),
 }
 
+fn deserialize_field_update<'de, D>(deserializer: D) -> Result<FieldUpdate<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match Option::<String>::deserialize(deserializer)? {
+        Some(value) => FieldUpdate::Set(value),
+        None => FieldUpdate::Delete,
+    })
+}
+
 /// 修改会话属性的请求体
 ///
 /// 供 `PATCH /auth/session` 和 `PATCH /auth/sessions/{session_id}` 使用。
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 pub struct UpdateSessionRequest {
     /// 设备的自定义别名（如 `"我的办公 MacBook"`）
     ///
     /// 序列化方案待定，参见 README §2.3.3
+    #[serde(default, deserialize_with = "deserialize_field_update")]
     pub alias: FieldUpdate<String>,
 }
 
 /// 修改会话属性成功后的响应载荷
 ///
 /// 供 `PATCH /auth/session` 和 `PATCH /auth/sessions/{session_id}` 使用。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSessionData {
     /// 被修改的会话全局唯一标识（256-bit Global ID）
     pub session_id: String,
@@ -150,7 +259,7 @@ pub struct UpdateSessionData {
 /// 客户端应按照 `method` 向 `target` 发起请求以完成 IdP 侧的全局登出。
 ///
 /// 参见：<https://openid.net/specs/openid-connect-rpinitiated-1_0.html>
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidcLogoutAction {
     /// 浏览器发起登出请求所使用的 HTTP 方法
     pub method: LogoutMethod,
@@ -166,7 +275,7 @@ pub struct OidcLogoutAction {
 }
 
 /// OIDC 登出请求的 HTTP 方法
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LogoutMethod {
     #[serde(rename = "GET")]
     Get,
@@ -178,7 +287,7 @@ pub enum LogoutMethod {
 /// 会话分类标记
 ///
 /// 用于在多设备列表中区分当前正在使用的设备与其他远程设备。
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionKind {
     /// 当前正在发出本次请求的设备
@@ -232,7 +341,7 @@ pub struct GetSessionQuery {
 }
 
 /// `GET /auth/session` 的成功响应载荷
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetSessionData {
     /// 当前会话/设备的全局唯一标识（256-bit Global ID）
     pub session_id: String,
@@ -258,7 +367,7 @@ pub struct GetSessionData {
 /// `GET /auth/session` 中 `protected` 字段解码后的 JWS 载荷
 ///
 /// 代表已通过 OIDC 强验证的身份属性，由服务端签名背书，不可篡改。
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtectedJwsPayload {
     /// 用户的唯一标识（Subject），用于关联业务账户
     pub sub: String,
@@ -278,7 +387,7 @@ pub struct ProtectedJwsPayload {
 }
 
 /// `POST /auth/session/refresh` 的成功响应载荷
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRefreshData {
     /// 新签发的 Access Token（JWT）
     ///
@@ -293,7 +402,7 @@ pub struct SessionRefreshData {
 }
 
 /// `DELETE /auth/session` 的成功响应载荷
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteSessionData {
     /// 被注销的会话/设备 ID（256-bit Global ID）
     pub session_id: String,
@@ -308,7 +417,7 @@ pub struct DeleteSessionData {
 // ─── 多设备审计（/auth/sessions）────────────────────────────────────────────
 
 /// `GET /auth/sessions` 响应中的单个设备条目
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionListItem {
     /// 设备的全局唯一标识（256-bit Global ID）
     pub session_id: String,
@@ -335,7 +444,7 @@ pub struct SessionListItem {
 }
 
 /// 设备的地理位置信息
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionGeoLocation {
     /// Cloudflare 数据中心三字代码（如 `"HKG"`、`"SJC"`）
     pub colo: String,
@@ -374,7 +483,7 @@ pub struct SessionGeoLocation {
 }
 
 /// `GET /auth/sessions/{session_id}` 的成功响应载荷
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDetailData {
     /// 设备的全局唯一标识（256-bit Global ID）
     pub session_id: String,
@@ -399,7 +508,7 @@ pub struct SessionDetailData {
 }
 
 /// 设备活跃时的接入环境快照
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionContext {
     /// 最近活跃时的客户端 IP 地址
     pub ip: IpAddr,
@@ -412,7 +521,7 @@ pub struct SessionContext {
     /// 包含 TLS 指纹（`tlsClientHelloEcho`）、ISP 名称（`asOrganization`）等详细信息。
     /// 字段定义参见：
     /// <https://developers.cloudflare.com/workers/runtime-apis/request/#incomingrequestcfproperties>
-    pub cf: Cf,
+    pub cf: CfProperties,
 }
 
 /// `DELETE /auth/sessions` 的查询参数
@@ -423,7 +532,7 @@ pub struct BatchDeleteQuery {
 }
 
 /// `DELETE /auth/sessions` 的成功响应载荷
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchDeleteSessionsData {
     /// 成功注销的会话总数
     pub count: u32,
@@ -439,7 +548,7 @@ pub struct BatchDeleteSessionsData {
 }
 
 /// 批量注销会话的范围
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionDeleteScope {
     /// 注销除当前会话外的所有其他活跃会话
@@ -454,7 +563,7 @@ pub enum SessionDeleteScope {
 /// 用户的全局账户安全配置
 ///
 /// 供 `GET /auth/preferences` 响应和 `PATCH /auth/preferences` 响应使用。
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserPreferences {
     /// 闲置自动登出时限
     pub idle_timeout: IdleTimeout,
@@ -466,7 +575,7 @@ pub struct UserPreferences {
 /// 闲置超时配置
 ///
 /// 控制会话在无活动状态下的最大存活时长。
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum IdleTimeout {
     /// 设置具体的闲置时限（以秒为单位存储与传输）
@@ -482,7 +591,7 @@ pub enum IdleTimeout {
 /// Tor 网络接入切换策略
 ///
 /// 控制同一会话是否允许在 Tor 与非 Tor 网络之间切换。
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TorTransition {
     /// 允许在普通网络与 Tor 之间切换

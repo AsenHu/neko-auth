@@ -5,13 +5,26 @@
 //!
 //! 所有接口均需要 `Authorization: Bearer <access_token>` 请求头。
 
+use std::sync::Arc;
+
 use axum::{
-    extract::{Path, Query},
-    http::StatusCode,
-    response::IntoResponse,
+    extract::{Json, Path, Query, State},
+    http::HeaderMap,
+    response::Response,
 };
 
-use crate::types::BatchDeleteQuery;
+use crate::{
+    api::{self, ApiError, ApiResult},
+    app::AppState,
+    do_protocol::{
+        BatchDeleteDeviceRequest, DeleteDeviceRequest, DeleteDeviceResponse, UpdateAliasRequest,
+        UserSessionRequest, UserSessionResponse,
+    },
+    oidc_flow,
+    types::{BatchDeleteQuery, BatchDeleteSessionsData, SessionDeleteScope, UpdateSessionRequest},
+};
+
+use super::support;
 
 // ─── 设备列表 ────────────────────────────────────────────────────────────────
 
@@ -25,9 +38,25 @@ use crate::types::BatchDeleteQuery;
 /// 3. 将 `current_session_id` 对应的条目标记为 `SessionKind::Current`，其余为 `Remote`
 /// 4. 从各 Session 记录中提取 CF 元数据，构造 `SessionGeoLocation`
 /// 5. 返回 `Vec<SessionListItem>` 数组
-pub async fn list_sessions() -> impl IntoResponse {
-    // TODO: 实现上述业务逻辑
-    StatusCode::NOT_IMPLEMENTED
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let claims = support::bearer_claims(&state, &headers)?;
+    let response = support::call_user_session(
+        &state,
+        &claims.sub,
+        &UserSessionRequest::ListSessions(crate::do_protocol::AuthenticatedSessionRequest {
+            session_id: claims.sid,
+        }),
+    )
+    .await?;
+    match response {
+        UserSessionResponse::ListSessions(data) => Ok(api::json_ok(data, &state.trace_id)),
+        _ => Err(ApiError::internal(
+            "user session durable object returned an unexpected list_sessions response",
+        )),
+    }
 }
 
 // ─── 设备详情 ────────────────────────────────────────────────────────────────
@@ -42,11 +71,26 @@ pub async fn list_sessions() -> impl IntoResponse {
 /// 3. **鉴权**：确认该 Session 归属于当前用户（防止越权读取他人会话）
 /// 4. 返回 `SessionDetailData`（含完整 CF 元数据快照，包括 TLS 指纹等）
 pub async fn get_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
-) -> impl IntoResponse {
-    // TODO: 实现上述业务逻辑
-    let _ = session_id;
-    StatusCode::NOT_IMPLEMENTED
+) -> ApiResult<Response> {
+    let claims = support::bearer_claims(&state, &headers)?;
+    let response = support::call_user_session(
+        &state,
+        &claims.sub,
+        &UserSessionRequest::GetSessionDetail(DeleteDeviceRequest {
+            current_session_id: claims.sid,
+            target_session_id: session_id,
+        }),
+    )
+    .await?;
+    match response {
+        UserSessionResponse::GetSessionDetail(data) => Ok(api::json_ok(data, &state.trace_id)),
+        _ => Err(ApiError::internal(
+            "user session durable object returned an unexpected get_session_detail response",
+        )),
+    }
 }
 
 // ─── 修改设备属性 ────────────────────────────────────────────────────────────
@@ -61,11 +105,28 @@ pub async fn get_session(
 /// 3. 按 `FieldUpdate` 语义更新 KV 中的 Session 别名字段
 /// 4. 返回 `UpdateSessionData`
 pub async fn update_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
-) -> impl IntoResponse {
-    // TODO: 实现上述业务逻辑（需先确定 FieldUpdate 序列化方案）
-    let _ = session_id;
-    StatusCode::NOT_IMPLEMENTED
+    Json(body): Json<UpdateSessionRequest>,
+) -> ApiResult<Response> {
+    let claims = support::bearer_claims(&state, &headers)?;
+    let response = support::call_user_session(
+        &state,
+        &claims.sub,
+        &UserSessionRequest::UpdateSession(UpdateAliasRequest {
+            current_session_id: claims.sid,
+            target_session_id: session_id,
+            alias: body.alias,
+        }),
+    )
+    .await?;
+    match response {
+        UserSessionResponse::UpdateSession(data) => Ok(api::json_ok(data, &state.trace_id)),
+        _ => Err(ApiError::internal(
+            "user session durable object returned an unexpected update_session response",
+        )),
+    }
 }
 
 // ─── 强制注销指定设备 ────────────────────────────────────────────────────────
@@ -83,11 +144,44 @@ pub async fn update_session(
 /// 4. 若配置了 OIDC 同步登出，构造 `OidcLogoutAction`
 /// 5. 返回 `DeleteSessionData`
 pub async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
-) -> impl IntoResponse {
-    // TODO: 实现上述业务逻辑
-    let _ = session_id;
-    StatusCode::NOT_IMPLEMENTED
+) -> ApiResult<Response> {
+    let claims = support::bearer_claims(&state, &headers)?;
+    let deleting_current = claims.sid == session_id;
+    let response = support::call_user_session(
+        &state,
+        &claims.sub,
+        &UserSessionRequest::DeleteSession(DeleteDeviceRequest {
+            current_session_id: claims.sid,
+            target_session_id: session_id,
+        }),
+    )
+    .await?;
+    match response {
+        UserSessionResponse::DeleteSession(DeleteDeviceResponse::Ok {
+            mut data,
+            id_token_hint,
+        }) => {
+            if deleting_current {
+                if let Ok(discovery) = oidc_flow::discover(&state.config.oidc).await {
+                    data.logout = support::logout_action(&discovery, &state, id_token_hint);
+                }
+            }
+            api::json_with_cookie(
+                data,
+                &state.trace_id,
+                deleting_current.then(|| support::clear_refresh_cookie(&state)),
+            )
+        }
+        UserSessionResponse::DeleteSession(DeleteDeviceResponse::NotFound) => Err(
+            ApiError::not_found("SESSION_NOT_FOUND", "session not found"),
+        ),
+        _ => Err(ApiError::internal(
+            "user session durable object returned an unexpected delete_session response",
+        )),
+    }
 }
 
 // ─── 批量注销会话 ────────────────────────────────────────────────────────────
@@ -112,9 +206,45 @@ pub async fn delete_session(
 /// 4. 若 `scope=all`，同时清除当前设备的 RT Cookie（`Max-Age=0`）
 /// 5. 返回 `BatchDeleteSessionsData`（含 `count` 和 `scope`）
 pub async fn batch_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<BatchDeleteQuery>,
-) -> impl IntoResponse {
-    // TODO: 实现上述业务逻辑
-    let _ = query;
-    StatusCode::NOT_IMPLEMENTED
+) -> ApiResult<Response> {
+    let claims = support::bearer_claims(&state, &headers)?;
+    let response = support::call_user_session(
+        &state,
+        &claims.sub,
+        &UserSessionRequest::BatchDelete(BatchDeleteDeviceRequest {
+            current_session_id: claims.sid,
+            scope: query.scope,
+        }),
+    )
+    .await?;
+    let batch = match response {
+        UserSessionResponse::BatchDelete(data) => data,
+        _ => {
+            return Err(ApiError::internal(
+                "user session durable object returned an unexpected batch_delete response",
+            ));
+        }
+    };
+
+    let logout = if matches!(query.scope, SessionDeleteScope::All) {
+        match oidc_flow::discover(&state.config.oidc).await {
+            Ok(discovery) => {
+                support::logout_action(&discovery, &state, batch.current_id_token_hint.clone())
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let data = BatchDeleteSessionsData {
+        count: batch.count,
+        scope: query.scope,
+        logout,
+    };
+    let clear_cookie = matches!(query.scope, SessionDeleteScope::All)
+        .then(|| support::clear_refresh_cookie(&state));
+    api::json_with_cookie(data, &state.trace_id, clear_cookie)
 }

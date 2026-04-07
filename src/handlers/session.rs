@@ -3,13 +3,26 @@
 //! 管理用户在当前活跃设备上的登录状态与令牌续期。
 //! 除 `refresh` 外，所有接口均需要 `Authorization: Bearer <access_token>` 请求头。
 
+use std::sync::Arc;
+
 use axum::{
-    extract::Query,
-    http::StatusCode,
-    response::IntoResponse,
+    extract::{Json, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::Response,
 };
 
-use crate::types::GetSessionQuery;
+use crate::{
+    api::{self, ApiError, ApiResult},
+    app::AppState,
+    do_protocol::{
+        DeleteDeviceRequest, RefreshDeviceRequest, RefreshDeviceResponse, SessionIdentityRequest,
+        UpdateAliasRequest, UserSessionRequest, UserSessionResponse,
+    },
+    oidc_flow, security,
+    types::{GetSessionQuery, UpdateSessionRequest},
+};
+
+use super::support;
 
 // ─── 获取当前会话信息 ────────────────────────────────────────────────────────
 
@@ -29,11 +42,29 @@ use crate::types::GetSessionQuery;
 ///    b. 构建 `ProtectedJwsPayload`（sub、email、phone_number）并生成 JWS
 /// 5. 返回 `GetSessionData`
 pub async fn get_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<GetSessionQuery>,
-) -> impl IntoResponse {
-    // TODO: 实现上述业务逻辑
-    let _ = query;
-    StatusCode::NOT_IMPLEMENTED
+) -> ApiResult<Response> {
+    let claims = support::bearer_claims(&state, &headers)?;
+    let response = support::call_user_session(
+        &state,
+        &claims.sub,
+        &UserSessionRequest::GetSession(SessionIdentityRequest {
+            session_id: claims.sid,
+            include_identity: query.identity,
+        }),
+    )
+    .await?;
+    match response {
+        UserSessionResponse::GetSession(mut data) => {
+            data.context = state.context.clone();
+            Ok(api::json_ok(data, &state.trace_id))
+        }
+        _ => Err(ApiError::internal(
+            "user session durable object returned an unexpected get_session response",
+        )),
+    }
 }
 
 // ─── 令牌续期 ────────────────────────────────────────────────────────────────
@@ -57,9 +88,109 @@ pub async fn get_session(
 ///       （属性详见 README §2.3.2：HttpOnly、Secure、SameSite=Strict、
 ///        Path=/auth/session/refresh、无 Domain）
 /// 6. 签发新 Access Token（JWT），返回 `SessionRefreshData`
-pub async fn refresh() -> impl IntoResponse {
-    // TODO: 实现上述业务逻辑
-    StatusCode::NOT_IMPLEMENTED
+pub async fn refresh(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let Some(refresh_token) =
+        support::refresh_cookie_value(&headers, &state.config.cookie.refresh_token_name)
+    else {
+        return support::unauthorized_with_clear_cookie(
+            &state,
+            "MISSING_REFRESH_TOKEN",
+            "missing refresh token cookie",
+        );
+    };
+    let claims =
+        match security::verify_refresh_token(&state.config.jwt, &state.host, &refresh_token) {
+            Ok(claims) => claims,
+            Err(error) => {
+                return support::unauthorized_with_clear_cookie(
+                    &state,
+                    "INVALID_REFRESH_TOKEN",
+                    error.to_string(),
+                );
+            }
+        };
+    let next_seq = claims.seq + 1;
+    let (next_refresh_token, _refresh_expires_at) = security::issue_refresh_token(
+        &state.config.jwt,
+        &state.host,
+        &claims.sub,
+        &claims.sid,
+        next_seq,
+    )
+    .map_err(|e| ApiError::internal(format!("failed to issue refresh token: {e}")))?;
+
+    let request = RefreshDeviceRequest {
+        session_id: claims.sid.clone(),
+        refresh_token_hash: security::hash_refresh_token(&refresh_token),
+        next_refresh_token_hash: security::hash_refresh_token(&next_refresh_token),
+        next_refresh_token_seq: next_seq,
+        context: state.context.clone(),
+        user_agent: crate::request_context::user_agent(&headers),
+        now: support::now_unix(),
+    };
+    let response =
+        support::call_user_session(&state, &claims.sub, &UserSessionRequest::Refresh(request))
+            .await?;
+    let refresh_response = match response {
+        UserSessionResponse::Refresh(response) => response,
+        _ => {
+            return Err(ApiError::internal(
+                "user session durable object returned an unexpected refresh response",
+            ));
+        }
+    };
+
+    match refresh_response {
+        RefreshDeviceResponse::Ok(data) if data.sub == claims.sub => {
+            let (access_token, expires_at) = security::issue_access_token(
+                &state.config.jwt,
+                &state.host,
+                &claims.sub,
+                &data.session_id,
+            )
+            .map_err(|e| ApiError::internal(format!("failed to issue access token: {e}")))?;
+            api::json_with_cookie(
+                crate::types::SessionRefreshData {
+                    access_token,
+                    expires_at,
+                },
+                &state.trace_id,
+                Some(support::set_refresh_cookie(&state, &next_refresh_token)),
+            )
+        }
+        RefreshDeviceResponse::Ok(_) => support::unauthorized_with_clear_cookie(
+            &state,
+            "INVALID_REFRESH_TOKEN",
+            "refresh token subject mismatch",
+        ),
+        RefreshDeviceResponse::Invalid => support::unauthorized_with_clear_cookie(
+            &state,
+            "INVALID_REFRESH_TOKEN",
+            "refresh token is no longer valid",
+        ),
+        RefreshDeviceResponse::Reused => support::unauthorized_with_clear_cookie(
+            &state,
+            "REFRESH_TOKEN_REUSED",
+            "refresh token reuse detected; the device session was revoked",
+        ),
+        RefreshDeviceResponse::IdleTimeout => Ok(api::error_with_cookie(
+            StatusCode::UNAUTHORIZED,
+            "AUTH_IDLE_TIMEOUT",
+            "session idle timeout",
+            &state.trace_id,
+            Some(support::clear_refresh_cookie(&state)),
+        )?),
+        RefreshDeviceResponse::TorTransitionDenied => Ok(api::error_with_cookie(
+            StatusCode::FORBIDDEN,
+            "AUTH_TOR_TRANSITION_DENIED",
+            "tor transition denied for this session",
+            &state.trace_id,
+            Some(support::clear_refresh_cookie(&state)),
+        )?),
+    }
 }
 
 // ─── 修改当前会话属性 ────────────────────────────────────────────────────────
@@ -78,9 +209,28 @@ pub async fn refresh() -> impl IntoResponse {
 ///    - `Delete`：清空 `alias` 字段
 ///    - `Set(v)`：写入新的 `alias` 值
 /// 5. 返回 `UpdateSessionData`
-pub async fn update_session() -> impl IntoResponse {
-    // TODO: 实现上述业务逻辑（需先确定 FieldUpdate 序列化方案）
-    StatusCode::NOT_IMPLEMENTED
+pub async fn update_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateSessionRequest>,
+) -> ApiResult<Response> {
+    let claims = support::bearer_claims(&state, &headers)?;
+    let response = support::call_user_session(
+        &state,
+        &claims.sub,
+        &UserSessionRequest::UpdateSession(UpdateAliasRequest {
+            current_session_id: claims.sid.clone(),
+            target_session_id: claims.sid,
+            alias: body.alias,
+        }),
+    )
+    .await?;
+    match response {
+        UserSessionResponse::UpdateSession(data) => Ok(api::json_ok(data, &state.trace_id)),
+        _ => Err(ApiError::internal(
+            "user session durable object returned an unexpected update_session response",
+        )),
+    }
 }
 
 // ─── 注销当前会话 ────────────────────────────────────────────────────────────
@@ -100,7 +250,43 @@ pub async fn update_session() -> impl IntoResponse {
 ///    （含 `id_token_hint`、`post_logout_redirect_uri` 等参数）
 /// 5. 写入清除 Cookie 的响应头：`Max-Age=0`（属性详见 README §2.3.4）
 /// 6. 返回 `DeleteSessionData`
-pub async fn delete_session() -> impl IntoResponse {
-    // TODO: 实现上述业务逻辑
-    StatusCode::NOT_IMPLEMENTED
+pub async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let claims = support::bearer_claims(&state, &headers)?;
+    let response = support::call_user_session(
+        &state,
+        &claims.sub,
+        &UserSessionRequest::DeleteSession(DeleteDeviceRequest {
+            current_session_id: claims.sid.clone(),
+            target_session_id: claims.sid,
+        }),
+    )
+    .await?;
+    match response {
+        UserSessionResponse::DeleteSession(crate::do_protocol::DeleteDeviceResponse::Ok {
+            mut data,
+            id_token_hint,
+        }) => {
+            if let Ok(discovery) = oidc_flow::discover(&state.config.oidc).await {
+                data.logout = support::logout_action(&discovery, &state, id_token_hint);
+            }
+            api::json_with_cookie(
+                data,
+                &state.trace_id,
+                Some(support::clear_refresh_cookie(&state)),
+            )
+        }
+        UserSessionResponse::DeleteSession(crate::do_protocol::DeleteDeviceResponse::NotFound) => {
+            support::unauthorized_with_clear_cookie(
+                &state,
+                "SESSION_NOT_FOUND",
+                "session was already logged out",
+            )
+        }
+        _ => Err(ApiError::internal(
+            "user session durable object returned an unexpected delete_session response",
+        )),
+    }
 }
