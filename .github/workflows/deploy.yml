@@ -23,18 +23,16 @@ jobs:
       # 设置 Rust 缓存，这会缓存 ~/.cargo 和 ./target 目录，大幅加速后续编译
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          add-job-id-key: "false"
 
       # 安装 worker-build
       - name: Install worker-build
         run: cargo install worker-build
 
       # 逆天 CF 自己不更新自己的 Wrangler 版本
-      - name: Install Wrangler
-        run: npm install -g wrangler@latest
-
       - name: Deploy to Production
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
+        run: npx wrangler@latest deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
