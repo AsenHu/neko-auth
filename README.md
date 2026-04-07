@@ -267,16 +267,13 @@ pub struct SessionRefreshData {
 ```rust
 pub struct UpdateSessionRequest {
     /// 设备的自定义别名 (如 "我的办公 MacBook")
-    /// [逻辑]：若为 null 则保持不变，若为空字符串则清空别名
+    /// 暂定具体的序列化方案
     pub alias: FieldUpdate<String>,
 }
 
 pub enum FieldUpdate<T> {
-    /// 不修改：JSON 中缺失该键
     Ignore,
-    /// 删除/重置：JSON 中该键的值为 null
     Delete,
-    /// 设置/更新：JSON 中该键为具体类型的值
     Set(T),
 }
 ```
@@ -499,19 +496,13 @@ pub struct SessionContext {
 ```rust
 pub struct UpdateSessionRequest {
     /// 设备的自定义别名 (如 "我的办公 MacBook")
-    /// [逻辑]：
-    /// - 忽略该字段：保持原别名不变
-    /// - 传字符串内容：更新别名为该值
-    /// - 传 null：删除别名（重置为未命名状态）
+    /// 暂定具体的序列化方案
     pub alias: FieldUpdate<String>,
 }
 
 pub enum FieldUpdate<T> {
-    /// 不修改：JSON 中缺失该键
     Ignore,
-    /// 删除/重置：JSON 中该键的值为 null
     Delete,
-    /// 设置/更新：JSON 中该键为具体类型的值
     Set(T),
 }
 ```
