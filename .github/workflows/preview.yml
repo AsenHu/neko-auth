@@ -22,6 +22,10 @@ jobs:
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      # 逆天 CF 自己不更新自己的 Wrangler 版本
+      - name: Install Wrangler
+        run: npm install -g wrangler@latest
+
       - name: Deploy to Preview
         uses: cloudflare/wrangler-action@v3
         with:
