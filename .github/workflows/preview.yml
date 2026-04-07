@@ -24,6 +24,10 @@ jobs:
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      # 安装 worker-build
+      - name: Install worker-build
+        run: cargo install worker-build
+
       # 逆天 CF 自己不更新自己的 Wrangler 版本
       - name: Install Wrangler
         run: npm install -g wrangler@latest
