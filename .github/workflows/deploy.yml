@@ -23,6 +23,8 @@ jobs:
       # 设置 Rust 缓存，这会缓存 ~/.cargo 和 ./target 目录，大幅加速后续编译
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
 
       # 安装 worker-build
       - name: Install worker-build
