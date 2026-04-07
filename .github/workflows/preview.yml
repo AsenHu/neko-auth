@@ -1,0 +1,40 @@
+name: Preview
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  deploy-to-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # 使用 rustup 指定并安装最新的 stable 版本
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          # CF Workers 需要编译为 WebAssembly
+          targets: wasm32-unknown-unknown
+
+      # 设置 Rust 缓存，这会缓存 ~/.cargo 和 ./target 目录，大幅加速后续编译
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      # 安装 worker-build
+      - name: Install worker-build
+        run: cargo install worker-build
+
+      # 逆天 CF 自己不更新自己的 Wrangler 版本
+      - name: Install Wrangler
+        run: npm install -g wrangler@latest
+
+      - name: Deploy to Preview
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --env dev

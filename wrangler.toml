@@ -1,0 +1,8 @@
+name = "neko-auth"
+main = "build/index.js"
+compatibility_date = "2026-04-06"
+
+[build]
+command = "worker-build --release"
+
+[env.dev]
