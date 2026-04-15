@@ -23,7 +23,7 @@
 use axum::{body, http};
 use worker;
 
-mod logic;
+mod oidc;
 
 #[worker::event(fetch)]
 async fn fetch(

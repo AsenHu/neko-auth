@@ -1,12 +1,5 @@
-use time::OffsetDateTime;
-
-/// Pure logical state that must be persisted before handing control
-/// to the upstream OIDC provider.
-pub struct AuthorizeState {
-    pub csrf_token: String,
-    pub pkce_verifier: String,
-    pub nonce: String,
-}
+use super::types;
+use time;
 
 /// Transport-agnostic data that the physical layer can use
 /// to construct its own response.
@@ -20,7 +13,7 @@ pub struct AuthorizeOutput {
 /// 1. persist the state
 /// 2. return the output back to the physical layer
 pub struct PreparedAuthorize {
-    pub state: AuthorizeState,
+    pub state: types::AuthorizeState,
     pub output: AuthorizeOutput,
 }
 
@@ -35,15 +28,15 @@ pub trait AuthorizePort {
 
     /// Returns the current time used by the pure logic layer
     /// to stamp the creation time of the authorization state.
-    fn current_time(&self) -> OffsetDateTime;
+    fn current_time(&self) -> time::OffsetDateTime;
 
     /// Persists the CSRF / PKCE / nonce state into any backend
     /// such as memory, a database, or another storage service,
     /// together with the explicit creation time chosen by the logic layer.
     fn store_authorization_state(
         &self,
-        state: &AuthorizeState,
-        created_at: OffsetDateTime,
+        state: &types::AuthorizeState,
+        created_at: time::OffsetDateTime,
     ) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
@@ -67,13 +60,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support;
     use super::*;
-    use core::future;
-    use core::task::{Context, Poll, Waker};
-    use std::cell::{Cell, RefCell};
-    use std::collections::VecDeque;
-    use std::{pin, thread};
-    use time::OffsetDateTime;
 
     #[derive(Debug, PartialEq, Eq)]
     enum TestError {
@@ -85,37 +73,35 @@ mod tests {
         csrf_token: String,
         pkce_verifier: String,
         nonce: String,
-        created_at: OffsetDateTime,
+        created_at: time::OffsetDateTime,
     }
 
     struct MockAuthorizePort {
-        build_results: RefCell<VecDeque<Result<PreparedAuthorize, TestError>>>,
-        current_times: RefCell<VecDeque<OffsetDateTime>>,
-        store_results: RefCell<VecDeque<Result<(), TestError>>>,
+        build_results: test_support::Script<Result<PreparedAuthorize, TestError>>,
+        clock: test_support::StubClock, // This comes with a built-in call count counter 这个自带调用次数计数器
+        store_results: test_support::Script<Result<(), TestError>>,
 
-        build_authorization_calls: Cell<usize>,
-        current_time_calls: Cell<usize>,
-        store_authorization_state_calls: Cell<usize>,
+        build_authorization_calls: test_support::Counter,
+        store_authorization_state_calls: test_support::Counter,
 
-        stored_authorizations: RefCell<Vec<StoredAuthorization>>,
+        stored_authorizations: test_support::Recordings<StoredAuthorization>,
     }
 
     impl MockAuthorizePort {
         fn new<const BUILD_N: usize, const TIME_N: usize, const STORE_N: usize>(
             build_results: [Result<PreparedAuthorize, TestError>; BUILD_N],
-            current_times: [OffsetDateTime; TIME_N],
+            current_times: [time::OffsetDateTime; TIME_N],
             store_results: [Result<(), TestError>; STORE_N],
         ) -> Self {
             Self {
-                build_results: RefCell::new(build_results.into_iter().collect()),
-                current_times: RefCell::new(current_times.into_iter().collect()),
-                store_results: RefCell::new(store_results.into_iter().collect()),
+                build_results: test_support::Script::new(build_results),
+                clock: test_support::StubClock::new(current_times),
+                store_results: test_support::Script::new(store_results),
 
-                build_authorization_calls: Cell::new(0),
-                current_time_calls: Cell::new(0),
-                store_authorization_state_calls: Cell::new(0),
+                build_authorization_calls: test_support::Counter::new(),
+                store_authorization_state_calls: test_support::Counter::new(),
 
-                stored_authorizations: RefCell::new(Vec::new()),
+                stored_authorizations: test_support::Recordings::new(),
             }
         }
     }
@@ -126,50 +112,36 @@ mod tests {
         fn build_authorization(
             &self,
         ) -> impl Future<Output = Result<PreparedAuthorize, Self::Error>> {
-            self.build_authorization_calls
-                .set(self.build_authorization_calls.get() + 1);
+            self.build_authorization_calls.increment();
 
             let result = self
                 .build_results
-                .borrow_mut()
-                .pop_front()
-                .expect("missing configured build_authorization return value");
+                .next("missing configured build_authorization return value");
 
             async move { result }
         }
 
-        fn current_time(&self) -> OffsetDateTime {
-            self.current_time_calls
-                .set(self.current_time_calls.get() + 1);
-
-            self.current_times
-                .borrow_mut()
-                .pop_front()
-                .expect("missing configured current_time return value")
+        fn current_time(&self) -> time::OffsetDateTime {
+            self.clock.now()
         }
 
         fn store_authorization_state(
             &self,
-            state: &AuthorizeState,
-            created_at: OffsetDateTime,
+            state: &types::AuthorizeState,
+            created_at: time::OffsetDateTime,
         ) -> impl Future<Output = Result<(), Self::Error>> {
-            self.store_authorization_state_calls
-                .set(self.store_authorization_state_calls.get() + 1);
+            self.store_authorization_state_calls.increment();
 
-            self.stored_authorizations
-                .borrow_mut()
-                .push(StoredAuthorization {
-                    csrf_token: state.csrf_token.clone(),
-                    pkce_verifier: state.pkce_verifier.clone(),
-                    nonce: state.nonce.clone(),
-                    created_at,
-                });
+            self.stored_authorizations.push(StoredAuthorization {
+                csrf_token: state.csrf_token.clone(),
+                pkce_verifier: state.pkce_verifier.clone(),
+                nonce: state.nonce.clone(),
+                created_at,
+            });
 
             let result = self
                 .store_results
-                .borrow_mut()
-                .pop_front()
-                .expect("missing configured store_authorization_state return value");
+                .next("missing configured store_authorization_state return value");
 
             async move { result }
         }
@@ -177,17 +149,17 @@ mod tests {
 
     #[test]
     fn authorize_returns_output_and_stores_state_with_created_at() {
-        let created_at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let created_at = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let port = MockAuthorizePort::new([ok_prepared_authorize()], [created_at], [Ok(())]);
 
-        let output = block_on(authorize(&port)).unwrap();
+        let output = test_support::block_on(authorize(&port)).unwrap();
 
         assert_eq!(
             output.authorization_url,
             "https://issuer.example.com/authorize?state=csrf-123"
         );
         assert_eq!(port.build_authorization_calls.get(), 1);
-        assert_eq!(port.current_time_calls.get(), 1);
+        assert_eq!(port.clock.calls(), 1);
         assert_eq!(port.store_authorization_state_calls.get(), 1);
 
         let stored = port.stored_authorizations.borrow();
@@ -202,7 +174,7 @@ mod tests {
     fn authorize_returns_build_error_without_storing_state() {
         let port = MockAuthorizePort::new([Err(TestError::Build)], [], []);
 
-        let result = block_on(authorize(&port));
+        let result = test_support::block_on(authorize(&port));
 
         match result {
             Err(TestError::Build) => {}
@@ -210,21 +182,21 @@ mod tests {
             Ok(_) => panic!("expected build error, got success"),
         }
         assert_eq!(port.build_authorization_calls.get(), 1);
-        assert_eq!(port.current_time_calls.get(), 0);
+        assert_eq!(port.clock.calls(), 0);
         assert_eq!(port.store_authorization_state_calls.get(), 0);
-        assert!(port.stored_authorizations.borrow().is_empty());
+        assert!(port.stored_authorizations.is_empty());
     }
 
     #[test]
     fn authorize_returns_store_error_after_persist_attempt() {
-        let created_at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let created_at = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let port = MockAuthorizePort::new(
             [ok_prepared_authorize()],
             [created_at],
             [Err(TestError::Store)],
         );
 
-        let result = block_on(authorize(&port));
+        let result = test_support::block_on(authorize(&port));
 
         match result {
             Err(TestError::Store) => {}
@@ -232,7 +204,7 @@ mod tests {
             Ok(_) => panic!("expected store error, got success"),
         }
         assert_eq!(port.build_authorization_calls.get(), 1);
-        assert_eq!(port.current_time_calls.get(), 1);
+        assert_eq!(port.clock.calls(), 1);
         assert_eq!(port.store_authorization_state_calls.get(), 1);
 
         let stored = port.stored_authorizations.borrow();
@@ -242,7 +214,7 @@ mod tests {
 
     fn ok_prepared_authorize() -> Result<PreparedAuthorize, TestError> {
         Ok(PreparedAuthorize {
-            state: AuthorizeState {
+            state: types::AuthorizeState {
                 csrf_token: "csrf-123".to_owned(),
                 pkce_verifier: "pkce-456".to_owned(),
                 nonce: "nonce-789".to_owned(),
@@ -251,21 +223,5 @@ mod tests {
                 authorization_url: "https://issuer.example.com/authorize?state=csrf-123".to_owned(),
             },
         })
-    }
-
-    fn block_on<F>(future: F) -> F::Output
-    where
-        F: future::Future,
-    {
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        let mut future = pin::pin!(future);
-
-        loop {
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(output) => return output,
-                Poll::Pending => thread::yield_now(),
-            }
-        }
     }
 }
