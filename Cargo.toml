@@ -3,6 +3,9 @@ name = "neko-auth"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 worker = { version = "0", features = ["http"] }
 axum = { version = "0", default-features = false }
