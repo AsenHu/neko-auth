@@ -23,6 +23,8 @@
 use axum::{body, http};
 use worker;
 
+mod logic;
+
 #[worker::event(fetch)]
 async fn fetch(
     _req: worker::Request,
