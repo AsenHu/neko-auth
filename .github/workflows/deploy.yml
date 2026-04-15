@@ -28,7 +28,7 @@ jobs:
 
       # 安装 worker-build
       - name: Install worker-build
-        run: cargo install worker-build
+        run: cargo install worker-build wasm-bindgen-cli wasm-opt
 
       # 逆天 CF 自己不更新自己的 Wrangler 版本
       - name: Deploy to Production
