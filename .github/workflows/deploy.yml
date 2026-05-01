@@ -12,6 +12,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 'latest'
+
       # 使用 rustup 指定并安装最新的 stable 版本
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
