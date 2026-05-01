@@ -146,66 +146,21 @@ Cookie 格式参见 `POST /auth/session/refresh`
 
 #### 2.3.1 获取当前用户信息 `GET /auth/session`
 
-本接口返回当前活跃会话的完整上下文、身份快照及由服务端签名背书的受保护凭据。支持通过查询参数按需获取重量级身份数据。
+本接口返回当前活跃会话的完整上下文。
 
 需要 `Authorization` 请求头。
-
-Query 参数
-
-| 参数 | 类型 | 必选 | 说明 |
-| :--- | :--- | :--- | :--- |
-| `identity` | `bool` | 否 | 默认为 `false`。仅当设为 `true` 时，响应中才会包含 `identity` 和 `protected` 字段。 |
-
-若客户端仅需校验 Token 有效性或获取当前物理接入环境（RequestContext），建议保持 `identity=false`。这可以跳过服务端对身份快照的检索，显著提升响应速度。
 
 ```rust
 pub struct GetSessionData {
     /// 当前会话/设备的全局唯一标识 (256-bit Global ID)
     pub session_id: String,
 
-    /// 运行上下文：反映当前物理连接的实时状态
-    pub context: RequestContext,
-
-    /// 身份快照：OIDC 提供商返回的全部原始非敏感声明 (Raw Claims)
-    /// 数据结构取决于 IdP 的具体实现，前端可用于展示头像、昵称等基础信息
-    /// 是一个 JSON
-    /// 仅在请求参数 `identity=true` 时存在
-    pub identity: Option<Value>,
-
-    /// 受保护的身份凭据 (JWS 紧凑序列化字符串)
-    /// 该字段为不可篡改的服务端签名，客户端应将其视为不透明 String 传输
-    /// 解析后的载荷结构参考下文：ProtectedJwsPayload
-    /// 仅在请求参数 `identity=true` 时存在
-    pub protected: Option<String>,
-}
-
-pub struct RequestContext {
     /// 客户端物理 IP 地址 (IPv4 或 IPv6)
     pub ip: IpAddr,
 
     /// Cloudflare 提供的地理与网络元数据
     /// 字段定义参考: https://developers.cloudflare.com/workers/runtime-apis/request/#incomingrequestcfproperties
     pub cf: Cf, 
-}
-
-/// 解码后的受保护 JWS 载荷 (Protected JwsPayload)
-/// 代表在 OIDC 端已经过强验证（Verified）的身份属性
-pub struct ProtectedJwsPayload {
-    /// 用户的唯一标识 (Subject)，用于关联业务账户
-    pub sub: String,
-
-    /// 经验证的电子邮件地址
-    /// [逻辑]：仅在 OIDC 侧 email_verified 为 true 时存在
-    pub email: Option<String>,
-
-    /// 经验证的电话号码
-    /// [逻辑]：仅在 OIDC 侧 phone_number_verified 为 true 时存在
-    pub phone_number: Option<String>,
-
-    /*
-        其他标准 JWT 字段（如 exp, iss, aud 等）由签名逻辑自动处理
-        此处仅列出业务相关的受保护字段
-    */
 }
 ```
 
