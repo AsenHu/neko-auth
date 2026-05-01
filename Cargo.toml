@@ -9,4 +9,3 @@ crate-type = ["cdylib"]
 [dependencies]
 worker = { version = "0", features = ["http"] }
 axum = { version = "0", default-features = false }
-time = { version = "0", default-features = false }
