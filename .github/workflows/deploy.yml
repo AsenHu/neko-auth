@@ -12,7 +12,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install Node
+      - name: Install Node.js for Wrangler
         uses: actions/setup-node@v6
         with:
           node-version: 'latest'
@@ -34,6 +34,9 @@ jobs:
       # 安装 worker-build
       - name: Install worker-build
         run: cargo install worker-build wasm-bindgen-cli wasm-opt
+
+      - name: Build Worker WASM bundle
+        run: worker-build --release
 
       # 逆天 CF 自己不更新自己的 Wrangler 版本
       - name: Deploy to Production
